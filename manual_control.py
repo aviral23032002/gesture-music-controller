@@ -7,11 +7,16 @@ import serial
 import serial.tools.list_ports
 import numpy as np
 import joblib
+from scipy.signal import butter, filtfilt
 from pynput.keyboard import Key, Controller
 
 # --- CONFIGURATION ---
 BAUD_RATE = 115200
 WINDOW_DURATION = 2.0  
+
+# --- FILTER CONFIGURATION ---
+CUTOFF = 5.0 # We only care about movements under 5 Hz (human speed)
+ORDER = 4    # Sharpness of the filter
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR = os.path.join(SCRIPT_DIR, "model")
@@ -25,6 +30,14 @@ LINE_RE = re.compile(
     r"\s*\|\s*"
     r"T:(?P<t>[-\d.]+)(?:\s*C)?" 
 )
+
+def butter_lowpass_filter(data, cutoff, fs, order=4):
+    """Applies a low-pass filter to remove high-frequency sensor noise."""
+    nyq = 0.5 * fs
+    normal_cutoff = cutoff / nyq
+    b, a = butter(order, normal_cutoff, btype='low', analog=False)
+    y = filtfilt(b, a, data)
+    return y
 
 def find_port():
     ports = serial.tools.list_ports.comports()
@@ -129,16 +142,26 @@ def main():
             print("[*] Recording stopped. Analyzing...")
             
             # 5. Extract Features and Predict
-            if len(current_buffer) > 10: # Ensure we actually captured data
+            # Increased minimum buffer check slightly to ensure the filter has enough data to work
+            if len(current_buffer) > 15: 
                 data_array = np.array(current_buffer)
+                
+                # Calculate the exact sampling frequency of this specific 2-second capture
+                fs = len(current_buffer) / WINDOW_DURATION
+                
                 features = []
                 for col in range(6):
                     axis_data = data_array[:, col]
+                    
+                    # --- NEW: APPLY LOW-PASS FILTER ---
+                    # Smooth the data exactly like we did during training
+                    clean_data = butter_lowpass_filter(axis_data, CUTOFF, fs, ORDER)
+                    
                     features.extend([
-                        np.mean(axis_data), 
-                        np.std(axis_data), 
-                        np.max(axis_data), 
-                        np.min(axis_data)
+                        np.mean(clean_data), 
+                        np.std(clean_data), 
+                        np.max(clean_data), 
+                        np.min(clean_data)
                     ])
                 
                 features_scaled = scaler.transform([features])

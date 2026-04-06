@@ -44,4 +44,5 @@ log/
 model/*.pkl
 
 # Data files (if sensitive or large)
+/data_og/
 # data/  # Uncomment if you want to ignore data directory
