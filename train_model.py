@@ -1,6 +1,7 @@
-import os
+import math
 import pandas as pd
 import numpy as np
+import os
 from scipy.signal import butter, filtfilt
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
@@ -15,9 +16,11 @@ MODEL_DIR = os.path.join(SCRIPT_DIR, "model")
 
 # --- FILTER CONFIGURATION ---
 # Assume a sampling rate of ~50 Hz (adjust if your ESP32 is faster/slower)
-FS = 50.0  
+FS = 100.0  # Matches main.c 10 ms period
+WINDOW_DURATION = 2.5 # Goldilocks window
 CUTOFF = 5.0 # We only care about movements under 5 Hz (human speed)
 ORDER = 4    # Sharpness of the filter
+MADGWICK_BETA = 0.1
 
 def butter_lowpass_filter(data, cutoff, fs, order=4):
     """Applies a low-pass filter to remove high-frequency sensor noise."""
@@ -29,31 +32,104 @@ def butter_lowpass_filter(data, cutoff, fs, order=4):
     y = filtfilt(b, a, data)
     return y
 
+class Madgwick:
+    """Madgwick AHRS implementation for sensor fusion."""
+    def __init__(self, sample_freq=100.0, beta=0.1):
+        self.sample_freq = sample_freq
+        self.beta = beta
+        self.q = np.array([1.0, 0.0, 0.0, 0.0]) # Quaternion [w, x, y, z]
+
+    def update(self, accel, gyro):
+        gx, gy, gz = gyro
+        ax, ay, az = accel
+        q = self.q
+        norm = np.linalg.norm(accel)
+        if norm == 0: return
+        ax /= norm; ay /= norm; az /= norm
+        f = np.array([
+            2.0*(q[1]*q[3] - q[0]*q[2]) - ax,
+            2.0*(q[0]*q[1] + q[2]*q[3]) - ay,
+            2.0*(0.5 - q[1]**2 - q[2]**2) - az
+        ])
+        j = np.array([
+            [-2.0*q[2], 2.0*q[3], -2.0*q[0], 2.0*q[1]],
+            [ 2.0*q[1], 2.0*q[0],  2.0*q[3], 2.0*q[2]],
+            [ 0.0,     -4.0*q[1], -4.0*q[2], 0.0]
+        ])
+        step = j.T @ f
+        step /= np.linalg.norm(step)
+        q_dot = 0.5 * self.q_mult(q, [0, gx, gy, gz]) - self.beta * step
+        self.q += q_dot * (1.0 / self.sample_freq)
+        self.q /= np.linalg.norm(self.q)
+
+    def q_mult(self, q1, q2):
+        w1, x1, y1, z1 = q1
+        w2, x2, y2, z2 = q2
+        return np.array([
+            w1*w2 - x1*x2 - y1*y2 - z1*z2,
+            w1*x2 + x1*w2 + y1*z2 - z1*y2,
+            w1*y2 - x1*z2 + y1*w2 + z1*x2,
+            w1*z2 + x1*y2 - y1*x2 + z1*w2
+        ])
+
+    def get_euler(self):
+        w, x, y, z = self.q
+        roll = math.atan2(2.0*(w*x + y*z), 1.0 - 2.0*(x*x + y*y))
+        pitch = math.asin(max(-1.0, min(1.0, 2.0*(w*y - z*x))))
+        yaw = math.atan2(2.0*(w*z + x*y), 1.0 - 2.0*(y*y + z*z))
+        return roll, pitch, yaw
+
 def extract_features(filepath):
     """Reads a gesture file, filters noise, and extracts statistical features."""
     try:
-        df = pd.read_csv(filepath, sep='\s+')
+        df = pd.read_csv(filepath, sep=r'\s+')
         
-        if len(df) < 10: # Increased minimum rows slightly to ensure the filter works properly
-            print(f"[WARNING] Skipping {os.path.basename(filepath)}: File is empty or too short.")
-            return None
-
+        target_len = int(FS * WINDOW_DURATION) # 400 samples
+        
+        # Pad or trim data to match the 4s window
+        if len(df) < target_len:
+            # Pad with the last value (sustaining the state) or mean
+            padding_len = target_len - len(df)
+            last_rows = df.iloc[-1:].iloc[np.zeros(padding_len)].copy()
+            df = pd.concat([df, last_rows], ignore_index=True)
+        elif len(df) > target_len:
+            df = df.iloc[:target_len]
+            
         features = []
         
-        # We extract features for both Accelerometer and Gyroscope
+        # 1. First, apply Low-Pass Filter to all raw channels
+        processed_channels = {}
         for col in ['AX', 'AY', 'AZ', 'GX', 'GY', 'GZ']:
             raw_data = df[col].values
+            processed_channels[col] = butter_lowpass_filter(raw_data, CUTOFF, FS, ORDER)
+        
+        # 2. Run Madgwick Fusion on the filtered data
+        fusion = Madgwick(sample_freq=FS, beta=MADGWICK_BETA)
+        orientation_history = []
+        
+        for i in range(len(df)):
+            accel = np.array([processed_channels['AX'][i], processed_channels['AY'][i], processed_channels['AZ'][i]])
+            gyro_deg = np.array([processed_channels['GX'][i], processed_channels['GY'][i], processed_channels['GZ'][i]])
+            gyro_rad = gyro_deg * (math.pi / 180.0)
             
-            # --- 1. APPLY FILTER ---
-            # Remove jitter/noise before doing any math
-            clean_data = butter_lowpass_filter(raw_data, CUTOFF, FS, ORDER)
+            fusion.update(accel, gyro_rad)
+            orientation_history.append(fusion.get_euler())
             
-            # --- 2. EXTRACT FEATURES ---
+        orientation_history = np.array(orientation_history) # Nx3 (Roll, Pitch, Yaw)
+        
+        # 3. Extract features from all 9 channels (6 raw filtered + 3 orientation)
+        all_channels = [
+            processed_channels['AX'], processed_channels['AY'], processed_channels['AZ'],
+            processed_channels['GX'], processed_channels['GY'], processed_channels['GZ'],
+            orientation_history[:, 0], orientation_history[:, 1], orientation_history[:, 2]
+        ]
+        
+        for channel_data in all_channels:
             features.extend([
-                np.mean(clean_data), 
-                np.std(clean_data), 
-                np.max(clean_data), 
-                np.min(clean_data)
+                np.mean(channel_data), 
+                np.std(channel_data), 
+                np.max(channel_data), 
+                np.min(channel_data)
             ])
             
         if np.isnan(features).any():
