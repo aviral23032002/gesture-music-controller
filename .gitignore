@@ -1,0 +1,48 @@
+# Build directories
+build/
+esp-idf/
+managed_components/
+
+# ESP-IDF specific
+sdkconfig.old
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs and temporary files
+log/
+*.tmp
+*.temp
+
+# Model files (if generated)
+model/*.pkl
+
+# Data files (if sensitive or large)
+/data_og/
+# data/  # Uncomment if you want to ignore data directory
