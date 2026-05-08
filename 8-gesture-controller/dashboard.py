@@ -3,7 +3,8 @@
 Gesture Music Controller — Live Dashboard
 
 Six-panel real-time dashboard showing gesture recognition state, model confidence,
-IMU waveform, session history, and per-gesture health stats.
+IMU waveform, session history, and per-gesture health stats. Includes live 
+Spotify track, album art, and volume status.
 
 Usage:
     python dashboard.py
@@ -18,6 +19,8 @@ import threading
 import time
 import math
 import subprocess
+import urllib.request
+import io
 from live_detect import Madgwick
 
 import matplotlib
@@ -43,6 +46,12 @@ try:
 except Exception:
     _HAS_PYNPUT = False
 
+try:
+    from PIL import Image
+    _HAS_PIL = True
+except ImportError:
+    _HAS_PIL = False
+
 # ── Configuration ─────────────────────────────────────────────────────────────
 BAUD_RATE       = 115200
 WINDOW_DURATION = 2.5   # seconds of IMU data per prediction window
@@ -67,7 +76,7 @@ GESTURE_ACTIONS = {
     "left":               ("Swipe left",  "Prev track",  "←"),
     "right":              ("Swipe right", "Next track",  "→"),
     "push":               ("Push fwd",    "Play/Pause",  "→|"),
-    "pull":               ("Pull back",   "Play/Pause",  "|←"),
+    "pull":               ("Pull back",   "Mute/Unmute", "|←"),
     "wrist_rotate_right": ("Roll right",  "+10s",        "↻"),
     "wrist_rotate_left":  ("Roll left",   "-10s",        "↺"),
     "clap":               ("Clap",        "Wake",        "><"),
@@ -111,7 +120,7 @@ GESTURE_COLORS = {
 
 # ── Utility functions ─────────────────────────────────────────────────────────
 
-def find_port() -> str | None:
+def find_port():
     ports = serial.tools.list_ports.comports()
     usb = [p for p in ports if "usb" in p.device.lower() or "serial" in p.device.lower()]
     if usb:
@@ -137,36 +146,57 @@ def get_spotify_info():
         script = '''
         if application "Spotify" is running then
             tell application "Spotify"
-                if player state is stopped then return "Stopped|"
+                if player state is stopped then return "Stopped| |0|"
                 set currentArtist to artist of current track
                 set currentTrack to name of current track
                 set playerState to player state as string
-                return currentTrack & " - " & currentArtist & "|" & playerState
+                set currentVol to sound volume as string
+                set artworkUrl to artwork url of current track
+                return currentTrack & "|" & currentArtist & "|" & playerState & "|" & currentVol & "|" & artworkUrl
             end tell
         else
-            return "Not running|Stopped"
+            return "Not running| |Stopped|0|"
         end if
         '''
-        res = subprocess.check_output(["osascript", "-e", script], timeout=1)
+        res = subprocess.check_output(["osascript", "-e", script], timeout=2)
         res = res.decode("utf-8").strip()
         parts = res.split("|")
-        if len(parts) == 2:
-            return parts[0], parts[1]
-        return res, ""
+        if len(parts) >= 5:
+            return parts[0], parts[1], parts[2], parts[3], parts[4]
+        return parts[0], "", parts[1], "0", ""
     except Exception:
-        return "Unknown", "Stopped"
+        return "Unknown", "", "Stopped", "0", ""
 
-def execute_command(gesture: str):
-    if gesture in ["push", "pull"]:
+def execute_command(gesture: str, shared: 'SharedState' = None):
+    if gesture == "push":
         send_spotify_command("playpause")
+    elif gesture == "pull":
+        if shared:
+            # Read current volume and saved volume
+            with shared.lock:
+                current_vol = shared.spotify_volume
+                saved_vol = shared.saved_volume
+            
+            try:
+                if int(current_vol) > 0:
+                    # System has sound. Save it, then mute.
+                    with shared.lock:
+                        shared.saved_volume = current_vol
+                    send_spotify_command("set sound volume to 0")
+                else:
+                    # System is muted. Restore to the saved volume.
+                    send_spotify_command(f"set sound volume to {saved_vol}")
+            except ValueError:
+                pass 
+                
     elif gesture == "right":
         send_spotify_command("next track")
     elif gesture == "left":
         send_spotify_command("previous track")
     elif gesture == "up":
-        send_spotify_command("set sound volume to (sound volume + 10)")
+        send_spotify_command("set sound volume to (sound volume + 20)")
     elif gesture == "down":
-        send_spotify_command("set sound volume to (sound volume - 10)")
+        send_spotify_command("set sound volume to (sound volume - 20)")
     elif gesture == "wrist_rotate_right":
         send_spotify_command("set player position to (player position + 10)")
     elif gesture == "wrist_rotate_left":
@@ -190,8 +220,15 @@ class SharedState:
         self.status           = "waiting"        # waiting|detecting|fired|cooldown
         self.serial_connected = False
         self.start_time       = time.perf_counter()
+        
+        # Spotify state
+        self.spotify_volume   = "0"
+        self.spotify_art_url  = ""
+        self.spotify_art_img  = None
         self.spotify_text     = "Loading Spotify..."
+        self.spotify_artist   = ""
         self.spotify_state    = "Stopped"
+        self.saved_volume     = "50"
 
     def snapshot(self) -> dict:
         with self.lock:
@@ -208,20 +245,42 @@ class SharedState:
                 "start_time":        self.start_time,
                 "spotify_text":      self.spotify_text,
                 "spotify_state":     self.spotify_state,
+                "spotify_volume":    self.spotify_volume,
+                "spotify_art_img":   self.spotify_art_img,
+                "spotify_artist":    self.spotify_artist,
             }
 
 class SpotifyPoller(threading.Thread):
     def __init__(self, shared: SharedState):
         super().__init__(daemon=True)
         self.shared = shared
+        self.last_url = ""
+        self.current_img = None
+
     def run(self):
         while True:
-            track, state = get_spotify_info()
-            with self.shared.lock:
-                self.shared.spotify_text = track
-                self.shared.spotify_state = state
-            time.sleep(1.0)
+            track, artist, state, vol, url = get_spotify_info()
+            
+            # Download new artwork if the URL changes
+            if url and url != self.last_url and _HAS_PIL:
+                try:
+                    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                    with urllib.request.urlopen(req) as response:
+                        img_data = response.read()
+                    img = Image.open(io.BytesIO(img_data)).convert('RGB')
+                    self.current_img = np.array(img)
+                    self.last_url = url
+                except Exception:
+                    pass # Fail silently, keep previous state
 
+            with self.shared.lock:
+                self.shared.spotify_text    = track
+                self.shared.spotify_artist  = artist
+                self.shared.spotify_state   = state
+                self.shared.spotify_volume  = vol
+                self.shared.spotify_art_img = self.current_img
+                
+            time.sleep(1.0)
 
 # ── Serial reader thread ──────────────────────────────────────────────────────
 
@@ -328,13 +387,13 @@ class PredictionThread(threading.Thread):
                 continue
 
             # ── Feature extraction with Butterworth low-pass filter (matching train_model.py) ──
-            raw_data = np.array(buf)[:, :6]  # Extract raw AX, AY, AZ, GX, GY, GZ
+            raw_data = np.array(buf)[:, :6]
             target_len = 250
             if len(raw_data) < target_len:
                 padding_len = target_len - len(raw_data)
                 data_array = np.vstack([raw_data, np.tile(raw_data[-1], (padding_len, 1))])
             else:
-                data_array = raw_data[-target_len:]  # FIX: Use the MOST RECENT 250 samples
+                data_array = raw_data[-target_len:]
 
             from scipy.signal import butter, filtfilt
             def butter_lowpass_filter(data, cutoff=5.0, fs=100.0, order=4):
@@ -347,7 +406,6 @@ class PredictionThread(threading.Thread):
             for col in range(6):
                 filtered_channels.append(butter_lowpass_filter(data_array[:, col]))
 
-            # Run Madgwick orientation estimation on the filtered channels
             fusion = Madgwick(sample_freq=100.0, beta=0.1)
             orientation_history = []
             for i in range(target_len):
@@ -431,9 +489,10 @@ class PredictionThread(threading.Thread):
                             self.shared.gesture_conf_sums[prediction] += confidence
                         self.shared.imu_buffer.clear()
 
-                    execute_command(prediction)
+                    execute_command(prediction, self.shared)
                     last_action_time = time.perf_counter()
                     wake_state = "IDLE"
+                    
                 else:
                     slide = max(1, int(len(buf) * 0.2))
                     with self.shared.lock:
@@ -459,7 +518,7 @@ class GestureDashboard:
         self._card_patches    = {}
         self._card_name_texts = {}
         self._conf_bars       = None
-        self._conf_labels     = []     # ordered gesture labels for bar chart
+        self._conf_labels     = []     
         self._conf_pct_texts  = []
         self._log_texts       = []
         self._waveform_lines  = {}
@@ -491,7 +550,8 @@ class GestureDashboard:
             5, 2,
             figure=self.fig,
             height_ratios=[1.8, 1.2, 2.0, 1.4, 1.2],
-            hspace=0.55, wspace=0.32,
+            hspace=0.55, 
+            wspace=0.16,  # <-- Reduced from 0.32 to halve the horizontal gap
             left=0.05, right=0.97, top=0.95, bottom=0.02,
         )
 
@@ -613,7 +673,6 @@ class GestureDashboard:
 
     def _init_confidence_bars(self):
         ax = self.ax_confidence
-        # Order bars: non-idle first, then idle
         self._conf_labels = NON_IDLE + ["idle"]
         colors   = [GESTURE_COLORS[g] for g in self._conf_labels]
         y_pos    = list(range(len(self._conf_labels)))
@@ -634,7 +693,6 @@ class GestureDashboard:
         ax.set_xlabel("Confidence", fontsize=8, color=C["dim"])
         ax.grid(True, axis="x", color=C["grid"], linewidth=0.5, linestyle="--")
 
-        # Percentage labels to the right of each bar
         for i, _ in enumerate(self._conf_labels):
             txt = ax.text(0.02, i, "0%",
                           va="center", ha="left", fontsize=8,
@@ -736,6 +794,56 @@ class GestureDashboard:
                 transform=ax.transAxes, ha="center", va="center",
                 fontsize=8, color=C["text"], zorder=3)
             self._health_conf_texts[gesture] = conf_txt
+
+    # ── Panel 7: Spotify Widget ─────────────────────────────────────────────
+
+    def _init_spotify_widget(self):
+        ax = self.ax_spotify
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+
+        # Widened 'extent' to make it render as a square
+        self._spotify_img = ax.imshow(
+            np.zeros((10, 10, 3), dtype=np.uint8), 
+            extent=[0.02, 0.11, 0.15, 0.85], 
+            aspect='auto', zorder=2
+        )
+        self._spotify_img.set_visible(False)
+
+        self._spotify_icon = ax.text(
+            0.03, 0.5, "♫",
+            transform=ax.transAxes, ha="left", va="center",
+            fontsize=24, color=C["green"], zorder=1)
+
+        # Track name shifted up
+        self._spotify_track = ax.text(
+            0.14, 0.65, "Loading Spotify...",
+            transform=ax.transAxes, ha="left", va="center",
+            fontsize=13, fontweight="bold", color=C["text"])
+
+        # New Artist name on the bottom line
+        self._spotify_artist = ax.text(
+            0.14, 0.35, "",
+            transform=ax.transAxes, ha="left", va="center",
+            fontsize=11, color=C["dim"])
+
+        # Volume widgets - positioned in the exact middle of the right-side gap
+        self._spotify_vol_icon = ax.text(
+            0.79, 0.5, "VOL",
+            transform=ax.transAxes, ha="right", va="center",
+            fontsize=9, fontweight="bold", color=C["dim"])
+            
+        self._spotify_vol_text = ax.text(
+            0.81, 0.5, "100%",
+            transform=ax.transAxes, ha="left", va="center",
+            fontsize=10, color=C["text"])
+
+        self._spotify_status = ax.text(
+            0.97, 0.5, "Stopped",
+            transform=ax.transAxes, ha="right", va="center",
+            fontsize=10, color=C["dim"],
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="#2a2d3a",
+                      edgecolor=C["grid"], linewidth=1))
 
     # ── Animation update (main thread only) ──────────────────────────────────
 
@@ -856,33 +964,63 @@ class GestureDashboard:
             self._health_conf_texts[gesture].set_text(
                 f"{avg*100:.0f}% avg" if n > 0 else "—")
 
-    def _init_spotify_widget(self):
-        ax = self.ax_spotify
-        ax.set_xlim(0, 1)
-        ax.set_ylim(0, 1)
-
-        self._spotify_icon = ax.text(
-            0.03, 0.5, "♫",
-            transform=ax.transAxes, ha="left", va="center",
-            fontsize=24, color=C["green"])
-
-        self._spotify_track = ax.text(
-            0.08, 0.5, "Loading Spotify...",
-            transform=ax.transAxes, ha="left", va="center",
-            fontsize=12, fontweight="bold", color=C["text"])
-
-        self._spotify_status = ax.text(
-            0.97, 0.5, "Stopped",
-            transform=ax.transAxes, ha="right", va="center",
-            fontsize=10, color=C["dim"],
-            bbox=dict(boxstyle="round,pad=0.3", facecolor="#2a2d3a",
-                      edgecolor=C["grid"], linewidth=1))
-
     def _update_spotify_widget(self, snap: dict):
-        text = snap["spotify_text"]
-        state = snap["spotify_state"]
+        text   = snap["spotify_text"]
+        artist = snap["spotify_artist"]
+        state  = snap["spotify_state"]
+        vol    = snap["spotify_volume"]
+        img    = snap["spotify_art_img"]
+        
+        # Truncate strings heavily to prevent overlapping the volume UI
+        max_len = 35
+        if len(text) > max_len: text = text[:max_len-3] + "..."
+        if len(artist) > max_len: artist = artist[:max_len-3] + "..."
+            
         self._spotify_track.set_text(text)
+        self._spotify_artist.set_text(artist)
         self._spotify_status.set_text(state.upper())
+        
+        # Volume logic
+        try:
+            vol_int = int(vol)
+            if vol_int <= 0:
+                # Hide the icon text, center "MUTED" in the gap
+                self._spotify_vol_icon.set_text("") 
+                self._spotify_vol_text.set_text("MUTED")
+                self._spotify_vol_text.set_color(C["red"])
+                self._spotify_vol_text.set_fontweight("bold")
+                self._spotify_vol_text.set_horizontalalignment("center")
+                self._spotify_vol_text.set_x(0.80) 
+            else:
+                # Restore split VOL / Percentage layout
+                self._spotify_vol_icon.set_text("VOL")
+                self._spotify_vol_icon.set_color(C["dim"])
+                self._spotify_vol_text.set_text(f"{vol_int}%")
+                self._spotify_vol_text.set_color(C["text"])
+                self._spotify_vol_text.set_fontweight("normal")
+                self._spotify_vol_text.set_horizontalalignment("left")
+                self._spotify_vol_text.set_x(0.80)
+        except ValueError:
+            self._spotify_vol_icon.set_text("VOL")
+            self._spotify_vol_icon.set_color(C["dim"])
+            self._spotify_vol_text.set_text("--%")
+            self._spotify_vol_text.set_horizontalalignment("left")
+            self._spotify_vol_text.set_x(0.81)
+
+        # Album Cover logic
+        if img is not None and state.lower() != "stopped":
+            self._spotify_img.set_data(img)
+            self._spotify_img.set_visible(True)
+            self._spotify_icon.set_visible(False)
+            self._spotify_track.set_position((0.14, 0.65))
+            self._spotify_artist.set_position((0.14, 0.35))
+        else:
+            self._spotify_img.set_visible(False)
+            self._spotify_icon.set_visible(True)
+            self._spotify_track.set_position((0.08, 0.65))
+            self._spotify_artist.set_position((0.08, 0.35))
+
+        # Status block colour logic
         if state.lower() == "playing":
             self._spotify_icon.set_color(C["green"])
             self._spotify_status.set_color(C["green"])
