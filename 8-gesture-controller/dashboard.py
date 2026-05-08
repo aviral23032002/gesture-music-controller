@@ -296,8 +296,8 @@ class PredictionThread(threading.Thread):
             if wake_state == "WAITING":
                 with self.shared.lock:
                     self.shared.status = "detecting"
-                    self.shared.last_action = "Waiting 3s..."
-                if now - wait_start_time >= 3.0:
+                    self.shared.last_action = "Waiting 1s..."
+                if now - wait_start_time >= 1.0:
                     wake_state = "CAPTURING"
                     with self.shared.lock:
                         self.shared.imu_buffer.clear()
@@ -327,19 +327,64 @@ class PredictionThread(threading.Thread):
                 time.sleep(0.01)
                 continue
 
-            # ── Feature extraction (mirrors live_detect.py exactly) ──
-            data_array = np.array(buf)[:, :9]
+            # ── Feature extraction with Butterworth low-pass filter (matching train_model.py) ──
+            raw_data = np.array(buf)[:, :6]  # Extract raw AX, AY, AZ, GX, GY, GZ
+            target_len = 250
+            if len(raw_data) < target_len:
+                padding_len = target_len - len(raw_data)
+                data_array = np.vstack([raw_data, np.tile(raw_data[-1], (padding_len, 1))])
+            else:
+                data_array = raw_data[-target_len:]  # FIX: Use the MOST RECENT 250 samples
+
+            from scipy.signal import butter, filtfilt
+            def butter_lowpass_filter(data, cutoff=5.0, fs=100.0, order=4):
+                nyq = 0.5 * fs
+                normal_cutoff = cutoff / nyq
+                b, a = butter(order, normal_cutoff, btype="low", analog=False)
+                return filtfilt(b, a, data)
+
+            filtered_channels = []
+            for col in range(6):
+                filtered_channels.append(butter_lowpass_filter(data_array[:, col]))
+
+            # Run Madgwick orientation estimation on the filtered channels
+            fusion = Madgwick(sample_freq=100.0, beta=0.1)
+            orientation_history = []
+            for i in range(target_len):
+                accel = [filtered_channels[0][i], filtered_channels[1][i], filtered_channels[2][i]]
+                gyro_rad = [filtered_channels[c][i] * (math.pi/180.0) for c in [3, 4, 5]]
+                fusion.update(accel, gyro_rad)
+                orientation_history.append(fusion.get_euler())
+                
+            orientation_history = np.array(orientation_history)
+            all_channels = filtered_channels + [
+                orientation_history[:, 0], orientation_history[:, 1], orientation_history[:, 2]
+            ]
+
             features = []
-            for col in range(9):
-                axis_data = data_array[:, col]
+            for col_data in all_channels:
+                mean_val = float(np.mean(col_data))
+                std_val = float(np.std(col_data))
+                if std_val > 0.0001:
+                    skew = float(np.mean((col_data - mean_val) ** 3) / (std_val ** 3))
+                    kurt = float(np.mean((col_data - mean_val) ** 4) / (std_val ** 4) - 3.0)
+                else:
+                    skew = 0.0
+                    kurt = 0.0
+
                 features.extend([
-                    float(np.mean(axis_data)),
-                    float(np.std(axis_data)),
-                    float(np.max(axis_data)),
-                    float(np.min(axis_data)),
+                    mean_val,
+                    std_val,
+                    float(np.max(col_data)),
+                    float(np.min(col_data)),
+                    float(np.sum(col_data)),
+                    float(np.sum(col_data**2)),
+                    float(np.max(col_data) - np.min(col_data)),
+                    float(np.sum(np.abs(col_data))),
+                    float(np.sum(np.abs(np.diff(col_data)))),
+                    skew,
+                    kurt
                 ])
-                features.append(float(np.sum(axis_data)))
-                features.append(float(np.sum(axis_data**2)))
 
             try:
                 features_scaled = self.scaler.transform([features])
@@ -358,7 +403,7 @@ class PredictionThread(threading.Thread):
                     wait_start_time = now
                     with self.shared.lock:
                         self.shared.last_gesture = "clap"
-                        self.shared.last_action = "Waiting 3s..."
+                        self.shared.last_action = "Waiting 1s..."
                         self.shared.confidence_dict = conf_dict
                         self.shared.imu_buffer.clear()
                 else:
@@ -732,7 +777,7 @@ class GestureDashboard:
             self._pipe_texts[0].set_color(C["ax"])
             self._det_gesture.set_text("WAITING FOR WAKE")
             self._det_gesture.set_color(C["dim"])
-        elif "Waiting 3s" in last_action:
+        elif "Waiting 1s" in last_action:
             self._pipe_boxes[1].set_facecolor("#3d2f16") # subtle amber
             self._pipe_boxes[1].set_edgecolor(C["amber"])
             self._pipe_texts[1].set_color(C["amber"])

@@ -127,11 +127,28 @@ def extract_features(filepath):
         
         features = []
         for data in all_channels:
-            # Stats (4 features)
-            features.extend([np.mean(data), np.std(data), np.max(data), np.min(data)])
-            # Physics/Energy (2 features)
-            features.append(np.sum(data))       # Net Impulse
-            features.append(np.sum(data**2))    # Total Energy/Work
+            mean_val = np.mean(data)
+            std_val = np.std(data)
+            if std_val > 0.0001:
+                skew = np.mean((data - mean_val) ** 3) / (std_val ** 3)
+                kurt = np.mean((data - mean_val) ** 4) / (std_val ** 4) - 3.0
+            else:
+                skew = 0.0
+                kurt = 0.0
+
+            features.extend([
+                mean_val,
+                std_val,
+                np.max(data),
+                np.min(data),
+                np.sum(data),
+                np.sum(data**2),
+                np.max(data) - np.min(data),
+                np.sum(np.abs(data)),
+                np.sum(np.abs(np.diff(data))),
+                skew,
+                kurt
+            ])
         return features
     except Exception as e:
         print(f"{C_RED}Error processing {filepath}: {e}{C_RESET}")
@@ -140,6 +157,7 @@ def extract_features(filepath):
 def main():
     parser = argparse.ArgumentParser(description="Train model on 2.5s gesture data")
     parser.add_argument("--data-dirs", nargs='+', default=None, help="Custom data directories (space separated, defaults to 8-gesture-controller/data)")
+    parser.add_argument("--max-samples", type=int, default=None, help="Maximum number of files to process per gesture per directory (default: load all files)")
     args = parser.parse_args()
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -171,7 +189,8 @@ def main():
             gesture_path = os.path.join(data_dir, gesture)
             files = [f for f in os.listdir(gesture_path) if f.endswith(".txt")]
             files.sort()
-            files = files[:30]
+            if args.max_samples is not None:
+                files = files[:args.max_samples]
             print(f"  * {gesture:20} : Processing {len(files)} files", end='', flush=True)
             
             success_count = 0
@@ -199,7 +218,7 @@ def main():
 
     # Train Random Forest Classifier
     print(f"\nTraining Random Forest model...")
-    model = RandomForestClassifier(n_estimators=100, random_state=42)
+    model = RandomForestClassifier(n_estimators=200, max_depth=16, class_weight='balanced', random_state=42)
     model.fit(X_train, y_train)
 
     # Evaluate

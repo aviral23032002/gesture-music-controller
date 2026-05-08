@@ -241,13 +241,63 @@ def main():
                         system_status = "ARMED"
                         continue
                         
-                    data_array = np.array(current_buffer)[:, :9]
+                    raw_data = np.array(current_buffer)[:, :6]  # Extract raw AX, AY, AZ, GX, GY, GZ
+                    target_len = 250
+                    if len(raw_data) < target_len:
+                        padding_len = target_len - len(raw_data)
+                        data_array = np.vstack([raw_data, np.tile(raw_data[-1], (padding_len, 1))])
+                    else:
+                        data_array = raw_data[-target_len:]  # FIX: Use the MOST RECENT 250 samples
+
+                    from scipy.signal import butter, filtfilt
+                    def butter_lowpass_filter(data, cutoff=5.0, fs=100.0, order=4):
+                        nyq = 0.5 * fs
+                        normal_cutoff = cutoff / nyq
+                        b, a = butter(order, normal_cutoff, btype="low", analog=False)
+                        return filtfilt(b, a, data)
+
+                    filtered_channels = []
+                    for col in range(6):
+                        filtered_channels.append(butter_lowpass_filter(data_array[:, col]))
+
+                    # Run Madgwick orientation estimation on the filtered channels
+                    fusion = Madgwick(sample_freq=SAMPLE_FEQ, beta=MADGWICK_BETA)
+                    orientation_history = []
+                    for i in range(target_len):
+                        accel = [filtered_channels[0][i], filtered_channels[1][i], filtered_channels[2][i]]
+                        gyro_rad = [filtered_channels[c][i] * (math.pi/180.0) for c in [3, 4, 5]]
+                        fusion.update(accel, gyro_rad)
+                        orientation_history.append(fusion.get_euler())
+                        
+                    orientation_history = np.array(orientation_history)
+                    all_channels = filtered_channels + [
+                        orientation_history[:, 0], orientation_history[:, 1], orientation_history[:, 2]
+                    ]
+
                     features = []
-                    for col in range(9):
-                        axis_data = data_array[:, col]
-                        features.extend([np.mean(axis_data), np.std(axis_data), np.max(axis_data), np.min(axis_data)])
-                        features.append(np.sum(axis_data))
-                        features.append(np.sum(axis_data**2))
+                    for col_data in all_channels:
+                        mean_val = np.mean(col_data)
+                        std_val = np.std(col_data)
+                        if std_val > 0.0001:
+                            skew = np.mean((col_data - mean_val) ** 3) / (std_val ** 3)
+                            kurt = np.mean((col_data - mean_val) ** 4) / (std_val ** 4) - 3.0
+                        else:
+                            skew = 0.0
+                            kurt = 0.0
+
+                        features.extend([
+                            mean_val,
+                            std_val,
+                            np.max(col_data),
+                            np.min(col_data),
+                            np.sum(col_data),
+                            np.sum(col_data**2),
+                            np.max(col_data) - np.min(col_data),
+                            np.sum(np.abs(col_data)),
+                            np.sum(np.abs(np.diff(col_data))),
+                            skew,
+                            kurt
+                        ])
                     
                     probs = model.predict_proba(scaler.transform([features]))[0]
                     max_idx = np.argmax(probs)
@@ -256,7 +306,7 @@ def main():
                     
                     if prediction == 'clap' and confidence >= 0.35:
                         print(f"{C_GREEN}[WAKE WORD] Clap detected! ({confidence * 100:.1f}%){C_RESET}")
-                        print(f"{C_CYAN}[WAITING] Waiting 3 seconds for next gesture...{C_RESET}")
+                        print(f"{C_CYAN}[WAITING] Waiting 1 second for next gesture...{C_RESET}")
                         wait_start_time = time.time()
                         system_status = "WAITING"
                     else:
@@ -265,7 +315,7 @@ def main():
                 continue
 
             if system_status == "WAITING":
-                if time.time() - wait_start_time >= 3.0:
+                if time.time() - wait_start_time >= 1.0:
                     print(f"\n{C_YELLOW}[CAPTURING ACTION] Recording command gesture now...{C_RESET}")
                     capture_start_time = time.time()
                     system_status = "CAPTURING_ACTION"
@@ -282,13 +332,63 @@ def main():
                         system_status = "ARMED"
                         continue
                         
-                    data_array = np.array(current_buffer)[:, :9]
+                    raw_data = np.array(current_buffer)[:, :6]  # Extract raw AX, AY, AZ, GX, GY, GZ
+                    target_len = 250
+                    if len(raw_data) < target_len:
+                        padding_len = target_len - len(raw_data)
+                        data_array = np.vstack([raw_data, np.tile(raw_data[-1], (padding_len, 1))])
+                    else:
+                        data_array = raw_data[-target_len:]  # FIX: Use the MOST RECENT 250 samples
+
+                    from scipy.signal import butter, filtfilt
+                    def butter_lowpass_filter(data, cutoff=5.0, fs=100.0, order=4):
+                        nyq = 0.5 * fs
+                        normal_cutoff = cutoff / nyq
+                        b, a = butter(order, normal_cutoff, btype="low", analog=False)
+                        return filtfilt(b, a, data)
+
+                    filtered_channels = []
+                    for col in range(6):
+                        filtered_channels.append(butter_lowpass_filter(data_array[:, col]))
+
+                    # Run Madgwick orientation estimation on the filtered channels
+                    fusion = Madgwick(sample_freq=SAMPLE_FEQ, beta=MADGWICK_BETA)
+                    orientation_history = []
+                    for i in range(target_len):
+                        accel = [filtered_channels[0][i], filtered_channels[1][i], filtered_channels[2][i]]
+                        gyro_rad = [filtered_channels[c][i] * (math.pi/180.0) for c in [3, 4, 5]]
+                        fusion.update(accel, gyro_rad)
+                        orientation_history.append(fusion.get_euler())
+                        
+                    orientation_history = np.array(orientation_history)
+                    all_channels = filtered_channels + [
+                        orientation_history[:, 0], orientation_history[:, 1], orientation_history[:, 2]
+                    ]
+
                     features = []
-                    for col in range(9):
-                        axis_data = data_array[:, col]
-                        features.extend([np.mean(axis_data), np.std(axis_data), np.max(axis_data), np.min(axis_data)])
-                        features.append(np.sum(axis_data))
-                        features.append(np.sum(axis_data**2))
+                    for col_data in all_channels:
+                        mean_val = np.mean(col_data)
+                        std_val = np.std(col_data)
+                        if std_val > 0.0001:
+                            skew = np.mean((col_data - mean_val) ** 3) / (std_val ** 3)
+                            kurt = np.mean((col_data - mean_val) ** 4) / (std_val ** 4) - 3.0
+                        else:
+                            skew = 0.0
+                            kurt = 0.0
+
+                        features.extend([
+                            mean_val,
+                            std_val,
+                            np.max(col_data),
+                            np.min(col_data),
+                            np.sum(col_data),
+                            np.sum(col_data**2),
+                            np.max(col_data) - np.min(col_data),
+                            np.sum(np.abs(col_data)),
+                            np.sum(np.abs(np.diff(col_data))),
+                            skew,
+                            kurt
+                        ])
                     
                     probs = model.predict_proba(scaler.transform([features]))[0]
                     max_idx = np.argmax(probs)
