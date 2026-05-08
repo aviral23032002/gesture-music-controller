@@ -136,6 +136,10 @@ def extract_features(filepath):
                 skew = 0.0
                 kurt = 0.0
 
+            half_len = len(data) // 2
+            half1 = data[:half_len]
+            half2 = data[half_len:]
+
             features.extend([
                 mean_val,
                 std_val,
@@ -147,7 +151,8 @@ def extract_features(filepath):
                 np.sum(np.abs(data)),
                 np.sum(np.abs(np.diff(data))),
                 skew,
-                kurt
+                kurt,
+                float(np.mean(half1) - np.mean(half2))
             ])
         return features
     except Exception as e:
@@ -188,9 +193,15 @@ def main():
         for gesture in gestures_found:
             gesture_path = os.path.join(data_dir, gesture)
             files = [f for f in os.listdir(gesture_path) if f.endswith(".txt")]
-            files.sort()
-            if args.max_samples is not None:
-                files = files[:args.max_samples]
+            # Sort numerically by extracting the digit from 'gesture_X.txt' to keep the selection stable
+            import re
+            files = sorted(files, key=lambda x: int(re.search(r'\d+', x).group()) if re.search(r'\d+', x) else 0)
+            if "friends_data" in data_dir:
+                # Keep all files
+                pass
+            else:
+                # Only use the first 30 files of user personal data
+                files = files[:30]
             print(f"  * {gesture:20} : Processing {len(files)} files", end='', flush=True)
             
             success_count = 0

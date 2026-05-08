@@ -430,6 +430,10 @@ class PredictionThread(threading.Thread):
                     skew = 0.0
                     kurt = 0.0
 
+                half_len = len(col_data) // 2
+                half1 = col_data[:half_len]
+                half2 = col_data[half_len:]
+
                 features.extend([
                     mean_val,
                     std_val,
@@ -441,7 +445,8 @@ class PredictionThread(threading.Thread):
                     float(np.sum(np.abs(col_data))),
                     float(np.sum(np.abs(np.diff(col_data)))),
                     skew,
-                    kurt
+                    kurt,
+                    float(np.mean(half1) - np.mean(half2))
                 ])
 
             try:
