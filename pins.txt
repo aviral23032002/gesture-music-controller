@@ -1,4 +1,0 @@
-SCL -> 19
-SDA -> 18
-VCC -> 3v3
-GND -> GND 

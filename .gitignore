@@ -1,3 +1,27 @@
+# -------------------------------------------------------------------
+# Root-level exclusions to keep repository clean and focused
+# We only want to track 8-gesture-controller/ and the ESP32 files.
+# -------------------------------------------------------------------
+
+# Ignore old root Python scripts
+/*.py
+
+# Ignore old root data and model folders
+/data/
+/data_og/
+/data_og_2/
+/model/
+
+# Ignore presentation and temporary root files
+*.key
+create_zip.sh
+dependencies.lock
+pins.txt
+
+# -------------------------------------------------------------------
+# Standard project ignores below
+# -------------------------------------------------------------------
+
 # Build directories
 build/
 esp-idf/
@@ -39,10 +63,3 @@ Thumbs.db
 log/
 *.tmp
 *.temp
-
-# Model files (if generated)
-model/*.pkl
-
-# Data files (if sensitive or large)
-/data_og/
-# data/  # Uncomment if you want to ignore data directory
