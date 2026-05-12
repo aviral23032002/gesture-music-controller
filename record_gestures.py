@@ -9,9 +9,9 @@ import pandas as pd
 
 # --- CONFIGURATION ---
 BAUD_RATE = 115200
-DURATION = 2          # Set to 2 seconds
-NUM_SAMPLES = 50      # Set to 50 samples
-CURRENT_GESTURE = 'rotate_right' # Change this manually (e.g., 'down', 'rotate_right', 'idle')
+DURATION = 2.5          # Set to 2.5 seconds
+NUM_SAMPLES = 25      # Set to 25 samples
+CURRENT_GESTURE = 'wrist_rotate_left' # Change this manually (e.g., 'down', 'rotate_right', 'idle')
 
 LINE_RE = re.compile(
     r"AX:(?P<ax>[-\d.]+)\s+AY:(?P<ay>[-\d.]+)\s+AZ:(?P<az>[-\d.]+)"
