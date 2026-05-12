@@ -3,8 +3,9 @@
 # We only want to track 8-gesture-controller/ and the ESP32 files.
 # -------------------------------------------------------------------
 
-# Ignore old root Python scripts
+# Ignore old root Python scripts (allow specific debugging tools)
 /*.py
+!/plot_imu.py
 
 # Ignore old root data and model folders
 /data/
@@ -15,8 +16,6 @@
 # Ignore presentation and temporary root files
 *.key
 create_zip.sh
-dependencies.lock
-pins.txt
 
 # -------------------------------------------------------------------
 # Standard project ignores below
