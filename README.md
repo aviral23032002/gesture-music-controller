@@ -85,5 +85,10 @@ Once the dashboard is running, the system will sit in an **Idle** state.
 
 ---
 
+## 🎬 Video Demo
+Watch the project demo here:
+
+[https://youtu.be/T-f_lNVKBn4](https://youtu.be/T-f_lNVKBn4)
+
 ## 📚 Technical Evolution
 Curious how the DSP and ML architectures were optimized to eliminate the massive latency constraints found in standard Human Activity Recognition models? Read the full engineering breakdown in [TECHNICAL_CHRONOLOGY.md](TECHNICAL_CHRONOLOGY.md).
